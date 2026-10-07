@@ -78,6 +78,17 @@ typedef struct DataCenter {
 	int configured;		      // Wheter the datacenter is configured or not.
 } DataCenter;
 
+typedef struct {
+    char id[64];         // Ex: "res_maria_1"
+    char type[64];       // Ex: "V1"
+    int server_id;       // ID da máquina física
+    int ram;
+    int disk;
+    int vcpu;
+    pid_t pid;           // PID do processo em execução (-1 se não estiver a correr)
+    int active;          // Flag para indicar se está ativa
+} VirtualMachine;
+
 /**
  * Initializes a Data Center.
  *

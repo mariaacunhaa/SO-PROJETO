@@ -1,11 +1,11 @@
 #include "datacenter_utils.h"
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <sys/wait.h>
 #include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
 
 VMType *VMType_exists(DataCenter *dc, const char* type_id){
 	for(size_t i = 0; i < dc->num_vm_types; i++){
@@ -238,34 +238,96 @@ void reservation_destroy(DataCenter *dc, Reservation *reservation) {
 	dc->num_reservations--;
 }
 
+
 void spawn_vm_child(VM *vm) {
-	(void)vm; // To avoid warning.
+    // 1. Limitar a RAM (RLIMIT_AS) - conversão de GB para bytes
+    struct rlimit ram_lim;
+    ram_lim.rlim_cur = (rlim_t)vm->type->required.ram * 1024 * 1024 * 1024;
+    ram_lim.rlim_max = ram_lim.rlim_cur;
+    if (setrlimit(RLIMIT_AS, &ram_lim) != 0) {
+        perror("setrlimit RAM");
+        exit(1);
+    }
 
-	// TODO: Limit RAM, DISK and use exec with cpulimit.
+    // 2. Limitar o Disco / Ficheiro (RLIMIT_FSIZE) - conversão de GB para bytes
+    struct rlimit disk_lim;
+    disk_lim.rlim_cur = (rlim_t)vm->type->required.disk * 1024 * 1024 * 1024;
+    disk_lim.rlim_max = disk_lim.rlim_cur;
+    if (setrlimit(RLIMIT_FSIZE, &disk_lim) != 0) {
+        perror("setrlimit FSIZE");
+        exit(1);
+    }
 
-	fprintf(stderr, "VM execution not implemented in base version.\n");
+    // 3. Mudar para a diretoria isolada da VM em /tmp/CloudIST/<res_id>/<vm_id>
+    char res_id[MAX_STRING_SIZE];
+    sscanf(vm->id, "%[^_]", res_id);
+    
+    char vm_dir[MAX_PATH_SIZE];
+    snprintf(vm_dir, sizeof(vm_dir), "/tmp/CloudIST/%s/%s", res_id, vm->id);
+    if (chdir(vm_dir) != 0) {
+        perror("chdir");
+        exit(1);
+    }
+
+    // 4. Calcular o cpulimit com base nos recursos do servidor
+    double total_dc_cpus = vm->server->total.cpu * vm->server->id;
+    double cpu_limit_pct = (vm->type->required.cpu / total_dc_cpus) * 100;
+    
+    char cpulimit_str[32];
+    snprintf(cpulimit_str, sizeof(cpulimit_str), "%.2f", cpu_limit_pct);
+
+    // 5. Executar com o cpulimit via execvp
+    char *args[] = {
+        "cpulimit",
+        "-q",
+        "-f",
+        "-l",
+        cpulimit_str,
+        "--",
+        vm->type->exec_path,
+        NULL
+    };
+
+    execvp("cpulimit", args);
+    
+    perror("execvp cpulimit");
+    exit(1);
 }
 
 int spawn_all_vms(Reservation *res) {
-	for (size_t i = 0; i < res->num_vms; i++) {
-		VM *vm = res->vms[i];
-
-		// TODO: Implement fork code. Set VM PID and update VM state to running.
-
-		spawn_vm_child(vm);
-
-	}
-
-	return 0;
+    for (size_t i = 0; i < res->num_vms; i++) {
+        VM *vm = res->vms[i];
+        
+        pid_t pid = fork();
+        if (pid < 0) {
+            perror("fork");
+            return 1;
+        } else if (pid == 0) {
+            // Processo Filho
+            spawn_vm_child(vm);
+            exit(0);
+        } else {
+            // Processo Pai
+            vm->pid = pid;
+            vm->state = VM_STATE_RUNNING;
+        }
+    }
+    return 0;
 }
 
 void wait_for_all_vms(Reservation *res) {
-	for (size_t i = 0; i < res->num_vms; i++) {
-		// TODO: IMPLEMENT WAITING FOR VM
-
-		res->vms[i]->state = VM_STATE_TERMINATED;
-	}
+    for (size_t i = 0; i < res->num_vms; i++) {
+        VM *vm = res->vms[i];
+        if (vm->state == VM_STATE_RUNNING) {
+            int status;
+            pid_t ws = waitpid(vm->pid, &status, 0);
+            if (ws > 0) {
+                vm->state = VM_STATE_TERMINATED;
+            }
+        }
+    }
 }
+
 
 const char *vm_state_to_string(VMState state) {
     switch (state) {
@@ -284,3 +346,5 @@ const char *res_state_to_string(ReservationState state) {
 			default:                 return "UNKNOWN";
     }
 }
+
+

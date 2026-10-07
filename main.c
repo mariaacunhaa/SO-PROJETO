@@ -1,21 +1,91 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-
 #include "parser.h"
 #include "datacenter.h"
 #include "constants.h"
 #include "filesystem.h" //para usar o list_conf_files
 #include <fcntl.h> //para poder usar o open() e as flags do open, como o O_RDONLY
+#include <pthread.h>
+int list_conf_files(const char *input_dir, char conf_files[][MAX_STRING_SIZE], size_t *num_conf_files);
+pthread_mutex_t dc_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+typedef struct {
+    DataCenter *dc;
+    char conf_path[MAX_PATH_SIZE];
+    pthread_mutex_t *mutex;
+} ThreadArgs;
+
+void *process_conf_file(void *arg) {
+    ThreadArgs *args = (ThreadArgs *)arg;
+    int fd = open(args->conf_path, O_RDONLY);
+    if (fd == -1) {
+        perror("open conf file");
+        pthread_exit(NULL);
+    }
+
+    int done = 0;
+    while (!done) {
+        switch (get_next_command(fd)) {
+            case CMD_DEFINE: {
+                VMType vmtype;
+                if (parse_define(fd, &vmtype) != 0) break;
+                
+                pthread_mutex_lock(args->mutex);
+                datacenter_define_VM(args->dc, &vmtype);
+                pthread_mutex_unlock(args->mutex);
+                break;
+            }
+            case CMD_RESERVE: {
+                Reservation reservation = {0};
+                if (parse_reserve(fd, &reservation, MAX_RESERVATIONS_ITEMS) == 0) break;
+
+                pthread_mutex_lock(args->mutex);
+                datacenter_reserve(args->dc, &reservation);
+                pthread_mutex_unlock(args->mutex);
+                break;
+            }
+            case CMD_EXECUTE: {
+                char id[MAX_STRING_SIZE];
+                if (parse_execute(fd, id) != 0) break;
+
+                pthread_mutex_lock(args->mutex);
+                datacenter_execute(args->dc, id);
+                pthread_mutex_unlock(args->mutex);
+                break;
+            }
+            case CMD_LIST:
+                pthread_mutex_lock(args->mutex);
+                datacenter_list(args->dc);
+                pthread_mutex_unlock(args->mutex);
+                break;
+            case CMD_WAIT: {
+                unsigned int delay;
+                if (parse_wait(fd, &delay) == 0) {
+                    datacenter_wait(delay);
+                }
+                break;
+            }
+            case EOC:
+                done = 1;
+                break;
+            default:
+                break;
+        }
+    }
+    close(fd);
+    return NULL;
+}
+
 
 int main(int argc, char **argv){
 	DataCenter dc;
 	datacenter_init(&dc);
 
-	if (argc != 6) { //mudança feita para a linha de comandos aceitar o input_dir
-    fprintf(stderr, "Usage: %s <servers> <ram> <disk> <cpus> <input_dir>\n", argv[0]);
-    return 1;
-  }
+	if (argc != 7) {
+		fprintf(stderr, "Usage: %s <servers> <ram> <disk> <cpus> <input_dir> <max_threads>\n", argv[0]);
+		return 1;
+	}
   	const char *input_dir = argv[5]; //input_dir aponta para o sexto elemento da linha de comandos, que é a diretoria com os ficheiros a ler
 
 	if(!path_exists(input_dir)){ //Valida que input_dir existe e que é uma diretoria
@@ -35,11 +105,13 @@ int main(int argc, char **argv){
 	size_t ram;
 	size_t disk;
 	double cpu;
+	size_t max_threads;
 
 	if (parse_size_t_arg(argv[1], &servers) != 0 ||
 			parse_size_t_arg(argv[2], &ram) != 0 ||
 			parse_size_t_arg(argv[3], &disk) != 0 ||
-			parse_double_arg(argv[4], &cpu) != 0) {
+			parse_double_arg(argv[4], &cpu) != 0 ||
+			parse_size_t_arg(argv[6], &max_threads) != 0) {
 		fprintf(stderr, "Invalid command line arguments.\n");
 		return 1;
 	}
@@ -172,3 +244,4 @@ int main(int argc, char **argv){
 
 datacenter_destroy(&dc); //já estava antes, pomos fora, liberta a memória que foi alocada ao longo da execução do programa pelo datacenter
 return 0;
+}

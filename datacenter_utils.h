@@ -15,6 +15,16 @@
 VMType *VMType_exists(DataCenter *dc, const char* type_id);
 
 /**
+ * Checks the parts of a reservation that do not depend on the current state
+ * of the servers: every item asks for at least one VM, uses an existing VM
+ * type and an existing server. Attaches the VMType to each item.
+ *
+ * @return 0 if valid.
+ * @return 1 otherwise (error is printed).
+ */
+int reservation_check_items(DataCenter *dc, Reservation *reservation);
+
+/**
  * Simulates the placement of every VM requested in the reservation using a
  * temporary copy of each server's available resources. The Data Center state
  * is left unchanged regardless of the outcome.

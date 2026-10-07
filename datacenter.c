@@ -120,13 +120,13 @@ int copy_reservation_inputs(Reservation *res){
     snprintf(dest_path, MAX_PATH_SIZE, "/tmp/CloudIST/%s/%s", res -> id, vm -> id); //vamos criar o caminho /tmp/CloudIST/<ID_reserva>/<ID_VM>/
     
     //criar as diretorias de destino
-    mkdir("/tmp/CloudIST", 0755) //NUMERO ESQUISITO
+    mkdir("/tmp/CloudIST", 0755); //NUMERO ESQUISITO
     char reserva_dir[MAX_PATH_SIZE];
     snprintf(reserva_dir, MAX_PATH_SIZE, "/tmp/CloudIST/%s", res -> id);
     mkdir(reserva_dir, 0755);
     mkdir(dest_path, 0755);
-
   }
+  return 0;
 }
 
 int datacenter_execute(DataCenter *dc, const char *reservation_id) {

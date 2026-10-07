@@ -1,6 +1,7 @@
 #define _XOPEN_SOURCE 700
 
 #include "filesystem.h"
+#include "constants.h"
 
 #include <sys/stat.h>
 #include <fcntl.h>
