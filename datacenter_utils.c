@@ -1,11 +1,15 @@
 #include "datacenter_utils.h"
-
-#include <sys/resource.h>
-#include <sys/wait.h>
-#include <unistd.h>
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <sys/resource.h>
+#include <errno.h>
+#include <signal.h>
+#include <time.h>
+#include "filesystem.h"
+
 
 VMType *VMType_exists(DataCenter *dc, const char* type_id){
 	for(size_t i = 0; i < dc->num_vm_types; i++){
@@ -15,6 +19,7 @@ VMType *VMType_exists(DataCenter *dc, const char* type_id){
 	}
 	return NULL;
 }
+
 
 /**
  * Checks if a reservation with the given id already exists in the Data Center.
@@ -33,6 +38,7 @@ static int reservation_exists(DataCenter *dc, const char* reservation_id){
 	}
 	return 0;
 }
+
 
 int reservation_validate(DataCenter *dc, Reservation *reservation) {
 	if(reservation_exists(dc, reservation->id)){
@@ -100,6 +106,7 @@ int reservation_validate(DataCenter *dc, Reservation *reservation) {
 	return 0;
 }
 
+
 /**
  * Rolls back the changes made by a reservation operation.
  * 
@@ -128,6 +135,7 @@ static void reservation_rollback(Reservation *reservation, size_t initial_vms){
 		free(vm);
 	}
 }
+
 
 int reservation_commit(DataCenter *dc, Reservation *reservation){
 	// Keep track of how many vms existed before.
@@ -168,6 +176,7 @@ int reservation_commit(DataCenter *dc, Reservation *reservation){
 	return 0;
 }
 
+
 Reservation *find_pending_reservation(DataCenter *dc, const char *reservation_id) {
 	Reservation *res = NULL;
 
@@ -191,141 +200,227 @@ Reservation *find_pending_reservation(DataCenter *dc, const char *reservation_id
 	return res;
 }
 
-void reservation_destroy(DataCenter *dc, Reservation *reservation) {
-	// Free every VM belonging to the reservation.
-	for (size_t i = 0; i < reservation->num_vms; i++) {
-		VM *vm = reservation->vms[i];
-		Server *server = vm->server;
 
-		// Return the VM resources back to the hosting server.
-		resources_add(&server->available, vm->type->required);
+/**
+ * Destroys the VM at position idx of the reservation: returns its resources to
+ * the hosting server, removes it from the server's hosted list and from the
+ * reservation, and frees it.
+ */
+static void vm_release(Reservation *reservation, size_t idx) {
+	VM *vm = reservation->vms[idx];
+	Server *server = vm->server;
 
-		// Remove the VM from the server's hosted VM list.
-		for (size_t j = 0; j < server->num_hosted_vms; j++) {
-			if (server->hosted_vms[j] == vm) {
-				// Shift the remaining VMs one position to the left.
-				memmove(&server->hosted_vms[j],
-								&server->hosted_vms[j + 1],
-								(server->num_hosted_vms - j - 1) * sizeof(VM *));
+	resources_add(&server->available, vm->type->required);
 
-				server->num_hosted_vms--;
-				break;
-			}
+	for (size_t j = 0; j < server->num_hosted_vms; j++) {
+		if (server->hosted_vms[j] == vm) {
+			memmove(&server->hosted_vms[j],
+							&server->hosted_vms[j + 1],
+							(server->num_hosted_vms - j - 1) * sizeof(VM *));
+			server->num_hosted_vms--;
+			break;
 		}
-
-		free(vm);
-		reservation->vms[i] = NULL;
 	}
 
-	reservation->num_vms = 0;
+	memmove(&reservation->vms[idx],
+					&reservation->vms[idx + 1],
+					(reservation->num_vms - idx - 1) * sizeof(VM *));
+	reservation->num_vms--;
+	reservation->vms[reservation->num_vms] = NULL;
 
-	// Find the reservation inside the Data Center reservation list.
-	size_t idx;
-	for (idx = 0; idx < dc->num_reservations; idx++) {
-			if (&dc->reservations[idx] == reservation)
-				break;
-	}
+	free(vm);
+}
 
-	// Reservation not found (should never happen).
-	if (idx == dc->num_reservations)
+
+/**
+ * Removes the reservation record from the Data Center (no VMs must be left).
+ */
+static void reservation_remove(DataCenter *dc, Reservation *reservation) {
+	size_t idx = (size_t)(reservation - dc->reservations);
+
+	if (idx >= dc->num_reservations)
 		return;
 
-	// Remove the reservation by shifting the remaining ones.
 	memmove(&dc->reservations[idx],
 					&dc->reservations[idx + 1],
 					(dc->num_reservations - idx - 1) * sizeof(Reservation));
-
 	dc->num_reservations--;
 }
 
 
-void spawn_vm_child(VM *vm) {
-    // 1. Limitar a RAM (RLIMIT_AS) - conversão de GB para bytes
-    struct rlimit ram_lim;
-    ram_lim.rlim_cur = (rlim_t)vm->type->required.ram * 1024 * 1024 * 1024;
-    ram_lim.rlim_max = ram_lim.rlim_cur;
-    if (setrlimit(RLIMIT_AS, &ram_lim) != 0) {
-        perror("setrlimit RAM");
-        exit(1);
-    }
+void reservation_destroy(DataCenter *dc, Reservation *reservation) {
+	while (reservation->num_vms > 0)
+		vm_release(reservation, reservation->num_vms - 1);
 
-    // 2. Limitar o Disco / Ficheiro (RLIMIT_FSIZE) - conversão de GB para bytes
-    struct rlimit disk_lim;
-    disk_lim.rlim_cur = (rlim_t)vm->type->required.disk * 1024 * 1024 * 1024;
-    disk_lim.rlim_max = disk_lim.rlim_cur;
-    if (setrlimit(RLIMIT_FSIZE, &disk_lim) != 0) {
-        perror("setrlimit FSIZE");
-        exit(1);
-    }
-
-    // 3. Mudar para a diretoria isolada da VM em /tmp/CloudIST/<res_id>/<vm_id>
-    char res_id[MAX_STRING_SIZE];
-    sscanf(vm->id, "%[^_]", res_id);
-    
-    char vm_dir[MAX_PATH_SIZE];
-    snprintf(vm_dir, sizeof(vm_dir), "/tmp/CloudIST/%s/%s", res_id, vm->id);
-    if (chdir(vm_dir) != 0) {
-        perror("chdir");
-        exit(1);
-    }
-
-    // 4. Calcular o cpulimit com base nos recursos do servidor
-    double total_dc_cpus = vm->server->total.cpu * vm->server->id;
-    double cpu_limit_pct = (vm->type->required.cpu / total_dc_cpus) * 100;
-    
-    char cpulimit_str[32];
-    snprintf(cpulimit_str, sizeof(cpulimit_str), "%.2f", cpu_limit_pct);
-
-    // 5. Executar com o cpulimit via execvp
-    char *args[] = {
-        "cpulimit",
-        "-q",
-        "-f",
-        "-l",
-        cpulimit_str,
-        "--",
-        vm->type->exec_path,
-        NULL
-    };
-
-    execvp("cpulimit", args);
-    
-    perror("execvp cpulimit");
-    exit(1);
+	reservation_remove(dc, reservation);
 }
 
-int spawn_all_vms(Reservation *res) {
-    for (size_t i = 0; i < res->num_vms; i++) {
-        VM *vm = res->vms[i];
-        
-        pid_t pid = fork();
-        if (pid < 0) {
-            perror("fork");
-            return 1;
-        } else if (pid == 0) {
-            // Processo Filho
-            spawn_vm_child(vm);
-            exit(0);
-        } else {
-            // Processo Pai
-            vm->pid = pid;
-            vm->state = VM_STATE_RUNNING;
-        }
-    }
-    return 0;
+
+// configuração do ambiente e execução do processo filho da VM
+void spawn_vm_child(VM *vm, const char *vm_dir, const char *exec_path,
+										const char *cpulimit_str) {
+	struct rlimit lim;
+
+	// limitação do RAM convertendo GB para bytes
+	lim.rlim_cur = (rlim_t)vm->type->required.ram << 30;
+	lim.rlim_max = lim.rlim_cur;
+	if (setrlimit(RLIMIT_AS, &lim) != 0)
+		_exit(1);
+
+	// limitação do tamanho máximo de ficheiro de escrita em GB
+	lim.rlim_cur = (rlim_t)vm->type->required.disk << 30;
+	lim.rlim_max = lim.rlim_cur;
+	if (setrlimit(RLIMIT_FSIZE, &lim) != 0)
+		_exit(1);
+
+	// mudar para a diretoria isolada da VM no sistema de ficheiros temporários
+	if (chdir(vm_dir) != 0)
+		_exit(1);
+
+	// preparar args e invocar o cpu limit via execvp para restringir uso de CPU
+	char *args[] = {"cpulimit", "-q", "-f", "-l", (char *)cpulimit_str,
+									"--", (char *)exec_path, NULL};
+
+	execvp("cpulimit", args);
+	// só se o exec falhar
+	_exit(1); 
 }
 
-void wait_for_all_vms(Reservation *res) {
-    for (size_t i = 0; i < res->num_vms; i++) {
-        VM *vm = res->vms[i];
-        if (vm->state == VM_STATE_RUNNING) {
-            int status;
-            pid_t ws = waitpid(vm->pid, &status, 0);
-            if (ws > 0) {
-                vm->state = VM_STATE_TERMINATED;
-            }
-        }
-    }
+
+// percorre todas as VMs associadas a uma reserva e cria processo filho utilizando fork
+int spawn_all_vms(DataCenter *dc, Reservation *res) {
+	// cálculo do total de CPUs disponíveis no datacenter para calcular percentagem
+	double total_cpus = dc->servers[0].total.cpu * (double)dc->num_servers;
+
+	for (size_t i = 0; i < res->num_vms; i++) {
+		VM *vm = res->vms[i];
+
+		char vm_dir[MAX_PATH_SIZE];
+		char exec_path[MAX_PATH_SIZE];
+		char cpulimit_str[32];
+
+		// caminho da diretoria da VM
+		int n = snprintf(vm_dir, sizeof(vm_dir), "/tmp/CloudIST/%s/%s", res->id, vm->id);
+		if (n < 0 || (size_t)n >= sizeof(vm_dir))
+			goto rollback;
+
+		// resolve o caminho absoluto do executável para evitar falhas após o chdir do fiho
+		if (absolute_path(vm->type->exec_path, exec_path, sizeof(exec_path)) != 0) {
+			fprintf(stderr, "Cannot resolve executable path of VM %s.\n", vm->id);
+			goto rollback;
+		}
+
+		// cálculo da percentagem de CPU exigida pela VM
+		double cpu_pct = vm->type->required.cpu / total_cpus * 100.0;
+		snprintf(cpulimit_str, sizeof(cpulimit_str), "%.2f", cpu_pct);
+
+		// evita duplicação de output em buffer no processo filho após fork
+		fflush(stdout); 
+		pid_t pid = fork();
+
+		if (pid < 0) {
+			perror("fork");
+			goto rollback;
+		}
+
+		if (pid == 0) {
+			// processo filho - chama a função de configuração e exec
+			spawn_vm_child(vm, vm_dir, exec_path, cpulimit_str);
+		}
+		// processo pai - regista o PID do filho e atualiza estado da VM
+		vm->pid = pid;
+		vm->state = VM_STATE_RUNNING;
+		continue;
+
+rollback:
+		// termina as Vms já lançadas se houver falha no meio do processo
+		for (size_t k = 0; k < i; k++) {
+			kill(res->vms[k]->pid, SIGKILL);
+			waitpid(res->vms[k]->pid, NULL, 0);
+			res->vms[k]->pid = 0;
+			res->vms[k]->state = VM_STATE_RESERVED;
+		}
+		return 1;
+	}
+
+	return 0;
+}
+
+
+/**
+ * Finds the VM with the given pid and its reservation.
+ */
+static VM *find_vm_by_pid(DataCenter *dc, pid_t pid, Reservation **res_out,
+													size_t *idx_out) {
+	for (size_t i = 0; i < dc->num_reservations; i++) {
+		Reservation *res = &dc->reservations[i];
+		for (size_t j = 0; j < res->num_vms; j++) {
+			if (res->vms[j]->state == VM_STATE_RUNNING && res->vms[j]->pid == pid) {
+				*res_out = res;
+				*idx_out = j;
+				return res->vms[j];
+			}
+		}
+	}
+	return NULL;
+}
+
+
+/**
+ * Handles one finished VM process: destroys the VM (resources go back to its
+ * server) and, if it was the last VM of its reservation, erases the reservation.
+ */
+static void handle_finished_vm(DataCenter *dc, pid_t pid) {
+	Reservation *res;
+	size_t idx;
+	VM *vm = find_vm_by_pid(dc, pid, &res, &idx);
+	if (vm == NULL)
+		return;
+
+	vm->state = VM_STATE_TERMINATED;
+	vm_release(res, idx);
+
+	if (res->num_vms == 0) {
+		res->state = RES_STATE_FINISHED;
+		reservation_remove(dc, res);
+	}
+}
+
+
+// processa o fim de uma VM
+void reap_finished_vms(DataCenter *dc) {
+	for (;;) {
+		pid_t pid = waitpid(-1, NULL, WNOHANG);
+
+		if (pid < 0 && errno == EINTR)
+			continue;
+		if (pid <= 0) // nothing else finished (or no children)
+			break;
+
+		handle_finished_vm(dc, pid);
+	}
+}
+
+
+static int any_vm_running(DataCenter *dc) {
+	for (size_t i = 0; i < dc->num_reservations; i++)
+		if (dc->reservations[i].state == RES_STATE_RUNNING)
+			return 1;
+	return 0;
+}
+
+
+// aguarda bloqueantemente até que todas as Vms em execução no data center terminem
+// recolhendo os processos à medida que concluem
+void wait_for_all_vms(DataCenter *dc) {
+	while (any_vm_running(dc)) {
+		// bloqueia até que alguma VM termine
+		pid_t pid = waitpid(-1, NULL, 0);
+		if (pid > 0)
+			handle_finished_vm(dc, pid);
+		else if (errno != EINTR)
+			break;
+	}
 }
 
 
@@ -338,6 +433,7 @@ const char *vm_state_to_string(VMState state) {
     }
 }
 
+
 const char *res_state_to_string(ReservationState state) {
     switch (state) {
 			case RES_STATE_PENDING:  return "PENDING";
@@ -346,5 +442,3 @@ const char *res_state_to_string(ReservationState state) {
 			default:                 return "UNKNOWN";
     }
 }
-
-

@@ -1,11 +1,12 @@
 #include "datacenter.h"
 #include "datacenter_utils.h"
-
 #include <stdio.h>
 #include <time.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h> //para o mkdir()
+#include <errno.h>
+
 
 void datacenter_init(DataCenter *dc) {
   dc->servers = NULL;
@@ -18,6 +19,7 @@ void datacenter_init(DataCenter *dc) {
   dc->configured = 0;
 }
 
+
 void datacenter_destroy(DataCenter *dc) {
   for (size_t i = 0; i < dc->num_servers; i++) {
     for(size_t j = 0; j < dc->servers[i].num_hosted_vms; j++){
@@ -26,6 +28,7 @@ void datacenter_destroy(DataCenter *dc) {
   }
   free(dc->servers);
 }
+
 
 int datacenter_configure(DataCenter *dc, size_t num_servers, Resources *resources){
   if(dc->configured){
@@ -58,6 +61,7 @@ int datacenter_configure(DataCenter *dc, size_t num_servers, Resources *resource
   return 0;
 }
 
+
 int datacenter_define_VM(DataCenter *dc, VMType *type){
   if (!dc->configured) {
     fprintf(stderr, "Data Center needs to be configured!\n");
@@ -89,6 +93,7 @@ int datacenter_define_VM(DataCenter *dc, VMType *type){
   return 0;
 }
 
+
 int datacenter_reserve(DataCenter *dc, Reservation *reservation) {
   if (!dc->configured) {
     fprintf(stderr, "Data Center needs to be configured!\n");
@@ -113,21 +118,42 @@ int datacenter_reserve(DataCenter *dc, Reservation *reservation) {
   return 0;
 }
 
-int copy_reservation_inputs(Reservation *res){
-  for(size_t i = 0; i < res -> num_vms; i++){ //vamos percorrer cada
-    VM *vm = res -> vms[i]; //array de vms dentro da reserva, vamos percorrer cada vm
-    char dest_path[MAX_PATH_SIZE];
-    snprintf(dest_path, MAX_PATH_SIZE, "/tmp/CloudIST/%s/%s", res -> id, vm -> id); //vamos criar o caminho /tmp/CloudIST/<ID_reserva>/<ID_VM>/
-    
-    //criar as diretorias de destino
-    mkdir("/tmp/CloudIST", 0755); //NUMERO ESQUISITO
-    char reserva_dir[MAX_PATH_SIZE];
-    snprintf(reserva_dir, MAX_PATH_SIZE, "/tmp/CloudIST/%s", res -> id);
-    mkdir(reserva_dir, 0755);
-    mkdir(dest_path, 0755);
+
+static int make_dir(const char *path){
+  if(mkdir(path, 0755) != 0 && errno != EEXIST){
+    perror("mkdir");
+    return 1;
   }
   return 0;
 }
+
+
+/**
+ * Creates /tmp/CloudIST/<res>/<vm> for every VM of the reservation and copies
+ * the input folder of the VM type into it.
+ */
+static int copy_reservation_inputs(Reservation *res){
+  char res_dir[MAX_PATH_SIZE];
+  snprintf(res_dir, sizeof(res_dir), "/tmp/CloudIST/%s", res->id);
+
+  if(make_dir("/tmp/CloudIST") != 0 || make_dir(res_dir) != 0)
+    return 1;
+
+  for(size_t i = 0; i < res->num_vms; i++){
+    VM *vm = res->vms[i];
+    char vm_dir[MAX_PATH_SIZE];
+    int n = snprintf(vm_dir, sizeof(vm_dir), "%s/%s", res_dir, vm->id);
+
+    if(n < 0 || (size_t)n >= sizeof(vm_dir) || make_dir(vm_dir) != 0)
+      return 1;
+
+    if(copy_directory_recursively(vm->type->input_folder, vm_dir) != 0)
+      return 1;
+  }
+
+  return 0;
+}
+
 
 int datacenter_execute(DataCenter *dc, const char *reservation_id) {
   if(!dc->configured){
@@ -138,20 +164,17 @@ int datacenter_execute(DataCenter *dc, const char *reservation_id) {
   Reservation *res = find_pending_reservation(dc, reservation_id);
   if (!res) return 1;
 
-  if(copy_reservation_inputs(res) != 0) return 1; //vamos chamar a função de cópia antes de arrancar as VMs
+  if(copy_reservation_inputs(res) != 0) return 1;
 
-  if (spawn_all_vms(res) != 0) return 1;
+  if (spawn_all_vms(dc, res) != 0) return 1;
 
+  // Do not wait here: the VMs are reaped later (reap_finished_vms), so the
+  // main flow can keep processing commands.
   res->state = RES_STATE_RUNNING;
-
-  wait_for_all_vms(res);
-
-  res->state = RES_STATE_FINISHED;
-
-  reservation_destroy(dc, res);
 
   return 0;
 }
+
 
 int datacenter_list(DataCenter *dc) {
   if (!dc->configured) {
@@ -251,7 +274,8 @@ int datacenter_list(DataCenter *dc) {
   return 0;
 }
 
+
 void datacenter_wait(unsigned int delay_ms){
-  struct timespec delay = (struct timespec){delay_ms / 1000, (delay_ms % 1000) * 1000000};
+  struct timespec delay = (struct timespec){(time_t)(delay_ms / 1000), (long)(delay_ms % 1000) * 1000000L};
   nanosleep(&delay, NULL);
 }

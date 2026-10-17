@@ -1,7 +1,7 @@
 #ifndef DATACENTER_UTILS__H
 #define DATACENTER_UTILS__H
-
 #include "datacenter.h"
+
 
 /**
  * Checks if a VMType with the given id exists.
@@ -14,15 +14,6 @@
  */
 VMType *VMType_exists(DataCenter *dc, const char* type_id);
 
-/**
- * Checks the parts of a reservation that do not depend on the current state
- * of the servers: every item asks for at least one VM, uses an existing VM
- * type and an existing server. Attaches the VMType to each item.
- *
- * @return 0 if valid.
- * @return 1 otherwise (error is printed).
- */
-int reservation_check_items(DataCenter *dc, Reservation *reservation);
 
 /**
  * Simulates the placement of every VM requested in the reservation using a
@@ -40,6 +31,7 @@ int reservation_check_items(DataCenter *dc, Reservation *reservation);
  * @return 1 otherwise.
  */
 int reservation_validate(DataCenter *dc, Reservation *reservation);
+
 
 /**
  * Creates all VMs requested by the reservation, assigns them to their
@@ -59,6 +51,7 @@ int reservation_validate(DataCenter *dc, Reservation *reservation);
  */
 int reservation_commit(DataCenter *dc, Reservation *reservation);
 
+
 /**
  * Looks up a reservation by id and checks that it is pending.
  *
@@ -69,6 +62,7 @@ int reservation_commit(DataCenter *dc, Reservation *reservation);
  * @return NULL if not found or not in RES_STATE_PENDING (error is printed).
  */
 Reservation *find_pending_reservation(DataCenter *dc, const char *reservation_id);
+
 
 /**
  * Frees every VM allocated to the reservation, returns their resources to the
@@ -81,33 +75,53 @@ Reservation *find_pending_reservation(DataCenter *dc, const char *reservation_id
  */
 void reservation_destroy(DataCenter *dc, Reservation *reservation);
 
-/**
- * Runs in the child process after fork(): sets resource limits (RAM,
- * disk) and execs the VM's workload under cpulimit. Never returns
- * (either execs successfully or calls exit(1) on failure).
- *
- * @param vm Pointer to the VM being spawned.
- */
-void spawn_vm_child(VM *vm);
 
 /**
- * Forks one child per VM in the reservation, calling spawn_vm_child()
- * in each child and recording the pid/state in the parent.
+ * Runs in the child process after fork(): sets the
+ * resource limits (RAM, disk), changes to the VM directory and execs the
+ * workload under cpulimit. Never returns. Only async-signal-safe calls are
+ * used, so it is safe in a multi-threaded program.
  *
+ * @param vm Pointer to the VM being spawned.
+ * @param vm_dir Directory of the VM (/tmp/CloudIST/<res>/<vm>).
+ * @param exec_path Absolute path of the executable.
+ * @param cpulimit_str CPU limit (percentage) already formatted as a string.
+ */
+void spawn_vm_child(VM *vm, const char *vm_dir, const char *exec_path,
+                    const char *cpulimit_str);
+
+
+/**
+ * Forks one child per VM in the reservation and records pid/state in the
+ * parent. If something fails, the VMs already launched are killed and the
+ * reservation is left untouched (still pending).
+ *
+ * @param dc Pointer to the Data Center.
  * @param res Pointer to the Reservation whose VMs should be spawned.
  *
  * @return 0 on success.
- * @return 1 if any fork() call fails.
+ * @return 1 on error.
  */
-int spawn_all_vms(Reservation *res);
+int spawn_all_vms(DataCenter *dc, Reservation *res);
+
 
 /**
- * Blocks until every VM's process has exited, updating each VM's state
- * to VM_STATE_TERMINATED as its pid is reaped.
+ * Non-blocking: reaps every VM process that already finished. Each finished
+ * VM is destroyed (resources returned to its server) and, when it was the last
+ * one of its reservation, the reservation is removed from the Data Center.
  *
- * @param res Pointer to the Reservation whose VMs should be waited on.
+ * @param dc Pointer to the Data Center.
  */
-void wait_for_all_vms(Reservation *res);
+void reap_finished_vms(DataCenter *dc);
+
+
+/**
+ * Blocks until every running VM has finished (and been destroyed).
+ *
+ * @param dc Pointer to the Data Center.
+ */
+void wait_for_all_vms(DataCenter *dc);
+
 
 /**
  * Converts a VM state to a human-readable string. Used by datacenter_list().
@@ -117,6 +131,7 @@ void wait_for_all_vms(Reservation *res);
  * @return Static, human-readable string describing the state.
  */
 const char *vm_state_to_string(VMState state);
+
 
 /**
  * Converts a reservation state to a human-readable string. Used by

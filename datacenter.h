@@ -78,17 +78,6 @@ typedef struct DataCenter {
 	int configured;		      // Wheter the datacenter is configured or not.
 } DataCenter;
 
-typedef struct {
-    char id[64];         // Ex: "res_maria_1"
-    char type[64];       // Ex: "V1"
-    int server_id;       // ID da máquina física
-    int ram;
-    int disk;
-    int vcpu;
-    pid_t pid;           // PID do processo em execução (-1 se não estiver a correr)
-    int active;          // Flag para indicar se está ativa
-} VirtualMachine;
-
 /**
  * Initializes a Data Center.
  *
@@ -158,8 +147,9 @@ int datacenter_list(DataCenter *dc);
 int datacenter_execute(DataCenter *dc, const char *reservation_id);
 
 /**
- * Executes a delay command.
- * 
+ * Executes a delay command. VMs that finish meanwhile are destroyed
+ * immediately.
+ *
  * @param delay_ms Delay in ms.
  */
 void datacenter_wait(unsigned int delay_ms);

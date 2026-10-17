@@ -1,7 +1,11 @@
-#ifndef FILESYSTEM__H
-#define FILESYSTEM__H
-
+#ifndef FILESYSTEM_H
+#define FILESYSTEM_H
 #include <stddef.h>
+#include "constants.h" // Para reconhecer MAX_STRING_SIZE
+
+
+int list_conf_files(const char *input_dir, char conf_files[][MAX_STRING_SIZE], size_t *num_conf_files);
+
 
 /**
  * Checks whether a path exists and is a directory.
@@ -12,6 +16,7 @@
  */
 int path_exists(const char *path);
 
+
 /**
  * Checks whether a path exists and is a regular file.
  *
@@ -20,6 +25,7 @@ int path_exists(const char *path);
  * @return 1 if it exists and is a regular file, 0 otherwise.
  */
 int file_exists(const char *path);
+
 
 /**
  * Converts the given path into an absolute path, resolving symbolic links,
@@ -35,4 +41,7 @@ int file_exists(const char *path);
  */
 int absolute_path(const char *path, char *buffer, size_t size);
 
-#endif // FILESYSTEM__H
+
+int copy_directory_recursively(const char *source, const char *dest);
+
+#endif // FILESYSTEM_H
