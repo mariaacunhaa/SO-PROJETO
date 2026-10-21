@@ -1,8 +1,9 @@
 #define _XOPEN_SOURCE 700
-
+#include <pthread.h>
 #include "filesystem.h"
 #include "constants.h"
-
+#include "datacenter.h"     
+#include "parser.h"
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -211,4 +212,117 @@ int copy_directory_recursively(const char *source, const char *dest){
   //fechamos a origem
   closedir(dir); 
   return 0;
+}
+
+
+// Função executada por cada worker thread para processar os ficheiros da fila
+void *process_conf_file(void *arg) {
+    ThreadPoolQueue *queue = (ThreadPoolQueue *)arg;
+    char current_file[MAX_STRING_SIZE];
+
+    while (1) {
+        // Secção crítica para retirar o próximo ficheiro da fila de forma segura
+        pthread_mutex_lock(&queue->queue_mutex);
+        if (queue->current_index >= queue->num_conf_files) {
+            pthread_mutex_unlock(&queue->queue_mutex);
+            break; // Fila vazia, a thread termina
+        }
+        strcpy(current_file, queue->conf_files[queue->current_index]);
+        queue->current_index++;
+        pthread_mutex_unlock(&queue->queue_mutex);
+
+        // Construir o caminho completo para abrir o ficheiro .conf
+        char full_path[MAX_PATH_SIZE];
+        snprintf(full_path, MAX_PATH_SIZE, "%s/%s", queue->input_dir, current_file);
+
+        int fd = open(full_path, O_RDONLY);
+        if (fd == -1) {
+            perror("open conf file");
+            continue;
+        }
+
+        int done = 0;
+        while (!done) {
+            switch (get_next_command(fd)) {
+                case CMD_DEFINE: {
+                    VMType vmtype;
+                    if (parse_define(fd, &vmtype) != 0) {
+                        fprintf(stderr, "Invalid define command in %s.\n", current_file);
+                        break;
+                    }
+
+                    pthread_mutex_lock(queue->mutex);
+                    if (datacenter_define_VM(queue->dc, &vmtype) != 0)
+                        fprintf(stderr, "Failed to define VM.\n");
+                    else
+                        printf("VM successfully defined!\n");
+                    pthread_mutex_unlock(queue->mutex);
+                    break;
+                }
+                case CMD_RESERVE: {
+                    Reservation reservation = {0};
+                    if (parse_reserve(fd, &reservation, MAX_RESERVATIONS_ITEMS) == 0) {
+                        fprintf(stderr, "Invalid reserve command in %s.\n", current_file);
+                        break;
+                    }
+
+                    pthread_mutex_lock(queue->mutex);
+                    reap_finished_vms(queue->dc);
+                    if (datacenter_reserve(queue->dc, &reservation) != 0)
+                        fprintf(stderr, "Failed to reserve VMs.\n");
+                    else
+                        printf("Reservation made successfully!\n");
+                    pthread_mutex_unlock(queue->mutex);
+                    break;
+                }
+                case CMD_EXECUTE: {
+                    char id[MAX_STRING_SIZE];
+                    if (parse_execute(fd, id) != 0) {
+                        fprintf(stderr, "Invalid execute command in %s.\n", current_file);
+                        break;
+                    }
+
+                    pthread_mutex_lock(queue->mutex);
+                    reap_finished_vms(queue->dc);
+                    if (datacenter_execute(queue->dc, id) != 0)
+                        fprintf(stderr, "Failed to execute reservation.\n");
+                    else
+                        printf("Finished reservation execution!\n");
+                    pthread_mutex_unlock(queue->mutex);
+                    break;
+                }
+                case CMD_LIST:
+                    pthread_mutex_lock(queue->mutex);
+                    reap_finished_vms(queue->dc);
+                    if (datacenter_list(queue->dc) != 0)
+                        fprintf(stderr, "Failed to list VMs.\n");
+                    pthread_mutex_unlock(queue->mutex);
+                    break;
+                case CMD_WAIT: {
+                    unsigned int delay;
+                    if (parse_wait(fd, &delay) != 0) {
+                        fprintf(stderr, "Invalid wait command in %s.\n", current_file);
+                        break;
+                    }
+                    datacenter_wait(delay); // dorme sem segurar o mutex
+
+                    pthread_mutex_lock(queue->mutex);
+                    reap_finished_vms(queue->dc);
+                    pthread_mutex_unlock(queue->mutex);
+                    break;
+                }
+                case CMD_INVALID:
+                    fprintf(stderr, "Invalid Command in %s.\n", current_file);
+                    break;
+                case CMD_HELP:
+                case CMD_EMPTY:
+                    break;
+                case EOC:
+                    done = 1;
+                    break;
+            }
+        }
+        close(fd);
+    }
+    return NULL;
 }

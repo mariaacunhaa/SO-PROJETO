@@ -287,63 +287,72 @@ void spawn_vm_child(VM *vm, const char *vm_dir, const char *exec_path,
 }
 
 
+
+// Função auxiliar para fazer rollback das VMs já iniciadas até ao índice atual
+static void rollback_vms(Reservation *res, size_t current_i) {
+    for (size_t k = 0; k < current_i; k++) {
+        if (res->vms[k]->pid > 0) {
+            kill(res->vms[k]->pid, SIGKILL);
+            waitpid(res->vms[k]->pid, NULL, 0);
+            res->vms[k]->pid = 0;
+            res->vms[k]->state = VM_STATE_RESERVED;
+        }
+    }
+}
+
 // percorre todas as VMs associadas a uma reserva e cria processo filho utilizando fork
 int spawn_all_vms(DataCenter *dc, Reservation *res) {
-	// cálculo do total de CPUs disponíveis no datacenter para calcular percentagem
-	double total_cpus = dc->servers[0].total.cpu * (double)dc->num_servers;
+    // cálculo do total de CPUs disponíveis no datacenter para calcular percentagem
+    double total_cpus = dc->servers[0].total.cpu * (double)dc->num_servers;
 
-	for (size_t i = 0; i < res->num_vms; i++) {
-		VM *vm = res->vms[i];
+    for (size_t i = 0; i < res->num_vms; i++) {
+        VM *vm = res->vms[i];
 
-		char vm_dir[MAX_PATH_SIZE];
-		char exec_path[MAX_PATH_SIZE];
-		char cpulimit_str[32];
+        char vm_dir[MAX_PATH_SIZE];
+        char exec_path[MAX_PATH_SIZE];
+        char cpulimit_str[32];
 
-		// caminho da diretoria da VM
-		int n = snprintf(vm_dir, sizeof(vm_dir), "/tmp/CloudIST/%s/%s", res->id, vm->id);
-		if (n < 0 || (size_t)n >= sizeof(vm_dir))
-			goto rollback;
+        // caminho da diretoria da VM
+        int n = snprintf(vm_dir, sizeof(vm_dir), "/tmp/CloudIST/%s/%s", res->id, vm->id);
+        if (n < 0 || (size_t)n >= sizeof(vm_dir)) {
+            rollback_vms(res, i);
+            return 1;
+        }
 
-		// resolve o caminho absoluto do executável para evitar falhas após o chdir do fiho
-		if (absolute_path(vm->type->exec_path, exec_path, sizeof(exec_path)) != 0) {
-			fprintf(stderr, "Cannot resolve executable path of VM %s.\n", vm->id);
-			goto rollback;
-		}
+        // resolve o caminho absoluto do executável para evitar falhas após o chdir do filho
+        if (absolute_path(vm->type->exec_path, exec_path, sizeof(exec_path)) != 0) {
+            fprintf(stderr, "Cannot resolve executable path of VM %s.\n", vm->id);
+            rollback_vms(res, i);
+            return 1;
+        }
 
-		// cálculo da percentagem de CPU exigida pela VM
-		double cpu_pct = vm->type->required.cpu / total_cpus * 100.0;
-		snprintf(cpulimit_str, sizeof(cpulimit_str), "%.2f", cpu_pct);
+        // cálculo da percentagem de CPU exigida pela VM
+        double cpu_pct = vm->type->required.cpu / total_cpus * 100.0;
+        snprintf(cpulimit_str, sizeof(cpulimit_str), "%.2f", cpu_pct);
 
-		// evita duplicação de output em buffer no processo filho após fork
-		fflush(stdout); 
-		pid_t pid = fork();
+        // evita duplicação de output em buffer no processo filho após fork
+        fflush(stdout); 
+        pid_t pid = fork();
 
-		if (pid < 0) {
-			perror("fork");
-			goto rollback;
-		}
+        if (pid < 0) {
+            perror("fork");
+            rollback_vms(res, i);
+            return 1;
+        }
 
-		if (pid == 0) {
-			// processo filho - chama a função de configuração e exec
-			spawn_vm_child(vm, vm_dir, exec_path, cpulimit_str);
-		}
-		// processo pai - regista o PID do filho e atualiza estado da VM
-		vm->pid = pid;
-		vm->state = VM_STATE_RUNNING;
-		continue;
+        if (pid == 0) {
+            // processo filho - chama a função de configuração e exec
+            spawn_vm_child(vm, vm_dir, exec_path, cpulimit_str);
+            // Se spawn_vm_child retornar por algum erro, o filho deve terminar
+            exit(1); 
+        }
 
-rollback:
-		// termina as Vms já lançadas se houver falha no meio do processo
-		for (size_t k = 0; k < i; k++) {
-			kill(res->vms[k]->pid, SIGKILL);
-			waitpid(res->vms[k]->pid, NULL, 0);
-			res->vms[k]->pid = 0;
-			res->vms[k]->state = VM_STATE_RESERVED;
-		}
-		return 1;
-	}
+        // processo pai - regista o PID do filho e atualiza estado da VM
+        vm->pid = pid;
+        vm->state = VM_STATE_RUNNING;
+    }
 
-	return 0;
+    return 0;
 }
 
 
