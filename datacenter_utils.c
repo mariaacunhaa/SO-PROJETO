@@ -303,6 +303,7 @@ static void rollback_vms(Reservation *res, size_t current_i) {
 // percorre todas as VMs associadas a uma reserva e cria processo filho utilizando fork
 int spawn_all_vms(DataCenter *dc, Reservation *res) {
     // cálculo do total de CPUs disponíveis no datacenter para calcular percentagem
+	// de CPU exigida por cada VM
     double total_cpus = dc->servers[0].total.cpu * (double)dc->num_servers;
 
     for (size_t i = 0; i < res->num_vms; i++) {
