@@ -36,6 +36,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    //declaração das variáveis para guardar os argumentos de linha de comando 
     size_t servers;
     size_t ram;
     size_t disk;

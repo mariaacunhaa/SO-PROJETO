@@ -248,6 +248,8 @@ static void reservation_remove(DataCenter *dc, Reservation *reservation) {
 }
 
 
+//Destrói uma reserva percorrendo todas pelos seus números (num_vms) e 
+//chamando a função vm_release para cada VM, libertando os recursos alocados.
 void reservation_destroy(DataCenter *dc, Reservation *reservation) {
 	while (reservation->num_vms > 0)
 		vm_release(reservation, reservation->num_vms - 1);
@@ -287,9 +289,9 @@ void spawn_vm_child(VM *vm, const char *vm_dir, const char *exec_path,
 }
 
 
-
-// Função auxiliar para fazer rollback das VMs já iniciadas até ao índice atual
+// termina as Vms já lançadas se houver falha no meio do processo
 static void rollback_vms(Reservation *res, size_t current_i) {
+	//Ciclo para terminar as VMs já lançadas
     for (size_t k = 0; k < current_i; k++) {
         if (res->vms[k]->pid > 0) {
             kill(res->vms[k]->pid, SIGKILL);
@@ -299,6 +301,7 @@ static void rollback_vms(Reservation *res, size_t current_i) {
         }
     }
 }
+
 
 // percorre todas as VMs associadas a uma reserva e cria processo filho utilizando fork
 int spawn_all_vms(DataCenter *dc, Reservation *res) {
@@ -397,21 +400,27 @@ static void handle_finished_vm(DataCenter *dc, pid_t pid) {
 }
 
 
-// processa o fim de uma VM
+// processa o fim de uma VM, sem bloquear
 void reap_finished_vms(DataCenter *dc) {
 	for (;;) {
+		// WNOHANG - devolve logo 0 se ainda tem filhos a correr, não espera
 		pid_t pid = waitpid(-1, NULL, WNOHANG);
 
+		// Interrompido por um sinal: se não for erro tenta outra vez
 		if (pid < 0 && errno == EINTR)
 			continue;
-		if (pid <= 0) // nothing else finished (or no children)
+		// 0 tem filhos, mas nenhum terminou
+		// -1 erro, em ambos os casos está tudo tratado
+		if (pid <= 0)
 			break;
 
+		// se um filho terminou, destrói a VM
 		handle_finished_vm(dc, pid);
 	}
 }
 
 
+// devolve 1 se tiver alguma reserva em execução, 0 caso não tenha
 static int any_vm_running(DataCenter *dc) {
 	for (size_t i = 0; i < dc->num_reservations; i++)
 		if (dc->reservations[i].state == RES_STATE_RUNNING)

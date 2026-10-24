@@ -222,16 +222,18 @@ void *process_conf_file(void *arg) {
 
     while (1) {
         // Secção crítica para retirar o próximo ficheiro da fila de forma segura
+        // para duas threads não apanharem o mesmo ficheiro// Secção crítica para retirar o próximo ficheiro da fila de forma segura
         pthread_mutex_lock(&queue->queue_mutex);
         if (queue->current_index >= queue->num_conf_files) {
             pthread_mutex_unlock(&queue->queue_mutex);
-            break; // Fila vazia, a thread termina
+            // Fila vazia, a thread termina, não tem mais ficheiros
+            break;
         }
         strcpy(current_file, queue->conf_files[queue->current_index]);
         queue->current_index++;
         pthread_mutex_unlock(&queue->queue_mutex);
 
-        // Construir o caminho completo para abrir o ficheiro .conf
+        // abre o ficheiro, sem mutex, cada thread tem o seu file descriptor
         char full_path[MAX_PATH_SIZE];
         snprintf(full_path, MAX_PATH_SIZE, "%s/%s", queue->input_dir, current_file);
 
@@ -241,6 +243,8 @@ void *process_conf_file(void *arg) {
             continue;
         }
 
+        // executa os comandos do ficheiro um a um, o mutex só é usado quando
+        // se mexe no data center
         int done = 0;
         while (!done) {
             switch (get_next_command(fd)) {
@@ -267,6 +271,7 @@ void *process_conf_file(void *arg) {
                     }
 
                     pthread_mutex_lock(queue->mutex);
+                    // liberta recursos de VMs que já acabaram
                     reap_finished_vms(queue->dc);
                     if (datacenter_reserve(queue->dc, &reservation) != 0)
                         fprintf(stderr, "Failed to reserve VMs.\n");
@@ -304,9 +309,11 @@ void *process_conf_file(void *arg) {
                         fprintf(stderr, "Invalid wait command in %s.\n", current_file);
                         break;
                     }
-                    datacenter_wait(delay); // dorme sem segurar o mutex
+                    // dorme sem segurar o mutex
+                    datacenter_wait(delay); 
 
                     pthread_mutex_lock(queue->mutex);
+                    // destrói as VMs que acabaram durante a espera
                     reap_finished_vms(queue->dc);
                     pthread_mutex_unlock(queue->mutex);
                     break;
